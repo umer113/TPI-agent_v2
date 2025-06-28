@@ -3,7 +3,6 @@ import os
 import shutil
 import subprocess
 from datetime import datetime
-from dotenv import load_dotenv
 import pandas as pd
 import streamlit as st
 from openai import AsyncOpenAI
@@ -22,7 +21,6 @@ import random
 import tiktoken
 import shutil
 
-load_dotenv()
 
 FIRST_PAGE_URL = {
     "DVA Minister": "https://minister.dva.gov.au/minister-media-releases?page=1",
@@ -72,6 +70,10 @@ TOP5_SELECTORS = {
 # Fallback if a key isn’t found:
 DEFAULT_SELECTOR = "a.card"
 
+
+if os.getenv("RAILWAY_ENVIRONMENT") is None:
+    from dotenv import load_dotenv
+    load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     st.error("Please set the OPENAI_API_KEY in your .env file.")
