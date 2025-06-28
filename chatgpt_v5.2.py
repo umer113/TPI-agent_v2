@@ -32,7 +32,10 @@ FIRST_PAGE_URL = {
     "DVA Website Home": "https://clik.dva.gov.au/",
     "DVA Website Latest News": "https://www.dva.gov.au/about/news/latest-news",
     "articles":"https://www.awm.gov.au/articles",
-    "RMA":"http://www.rma.gov.au/"
+    "RMA":"http://www.rma.gov.au/",
+    "X AWM": "https://x.com/awmemorial?lang=en",
+    "X DVA": "https://x.com/DVAAus",
+    "Instagram AWM": "https://www.instagram.com/dvaausgov/"
 }
 
 TOP5_SELECTORS = {
@@ -47,6 +50,13 @@ TOP5_SELECTORS = {
 
     # DVA Veteran Affairs: listings are in <div class="col-md-6"> with <a class="card">
     "DVA Veteran Affairs":          "div.col-md-6 a.card",
+
+    "X AWM" : None,
+
+    "X DVA" : None,
+
+    "Instagram AWM": None,
+
 
     # All the other DVA pages share the same “views” layout
     "DVA Repatriation Commission":  "div.views-row h2 a",
@@ -282,134 +292,82 @@ async def ask_agent(csv_text: str, question: str, model: str, chat_history: list
     def count_tokens(text: str) -> int:
         return len(encoding.encode(text))
 
-    # system_prompt = (
-    #     "You are ChatGPT — a helpful, intelligent, and articulate AI assistant. "
-        # "Engage with the user naturally, just like ChatGPT does. You can answer questions, explain concepts, write summaries or articles, and offer insights or ideas. "
-        # "Use the provided CSV dataset when it’s relevant, referencing specific rows or columns to support your answers — but you're not restricted to it. "
-        # "Always consider the full conversation history to give context-aware, coherent, and smart responses. "
-    #     "Format your response in a clear, structured manner using bullet points for key insights, details, or lists when appropriate. "
-    #     "Structure your response as follows: "
-    #     "- **Introduction**: Provide a brief context or overview of the response. "
-    #     "- **Main Points**: Use bullet points to present key information, insights, or answers clearly and concisely. "
-    #     "- **Conclusion**: Summarize the response or provide a closing statement, if relevant. "
-    #     "Be clear, creative, and conversational. If information is missing or uncertain, say so honestly instead of guessing."
-    # )
-    system_prompt = """
-    You are ChatGPT, a helpful, intelligent, and articulate AI assistant.
+    # detect article requests
+    is_article = any(kw in question.lower() for kw in (
+        "write an article", "write a comprehensive article", "article"
+    ))
 
-    -- **Conversational Mode (default)** --
-    • For any general question (including “summarize this”), reply in plain paragraphs or simple bullets.  
-    • Do **not** prepend “Introduction” or append “Conclusion.”  
-    • Only use lists when they genuinely make the answer clearer.
+    # build system prompt
+    if is_article:
+        system_prompt = (
+            "You are a professional writer. Produce a markdown article with:\n"
+            "- **Introduction** label in bold, followed by its paragraph.\n"
+            "- One or more sections, each starting with a bold label (e.g. **Background**, **Analysis**, etc.)\n"
+            "- **Conclusion** label in bold, followed by its paragraph.\n"
+            "At the very end, write exactly one follow-up question as plain text, e.g.:\n"
+            "Would you like to modify or expand this article?\n"
+            "Do NOT use any markdown headings (#) for that question or add extra closing remarks."
+        )
+    else:
+        system_prompt = (
+            "You are ChatGPT, a helpful assistant. Answer the user’s question directly and concisely, "
+            "using the data if relevant. You may use simple markdown (lists, bold) but do NOT write an article. "
+            "End with one brief follow-up question as plain text (no #)."
+        )
 
-    -- **Article Mode (only when asked)** --
-    If and only if the user explicitly asks you to “write an article,” “create an article,” or similar, format your response like:
-    1. A clear **Title**
-    2. An opening paragraph
-    3. Titled sections with headings
-    4. A closing summary
+    # prepare CSV + question
+    lines  = csv_text.split("\n")
+    header = lines[0]
+    rows   = lines[1:]
+    body   = "\n".join(rows)
+    user_block = f"{header}\n{body}\n\nUser asked: {question}\n"
 
-    Always pick **Conversational Mode** unless the user’s prompt contains the word “article” in the sense of “please write an article on…”.  
-    """
-
-
-
-
-    history_context = "".join(
-        f"{('User' if m['role'] == 'user' else 'Assistant')}: {m['content']}\n\n"
-        for m in chat_history
-    )
-
+    # token budget
     MODEL_MAX = 16385
-    HEADROOM = 512
-    usable_tokens = MODEL_MAX - HEADROOM
+    HEADROOM  = 512
+    static    = count_tokens(system_prompt) + count_tokens(header) + count_tokens(f"\nUser asked: {question}\n")
+    usable    = MODEL_MAX - HEADROOM - static
 
-    static_tokens = (
-        count_tokens(system_prompt)
-        + count_tokens("### Conversation History:\n")
-        + count_tokens(history_context)
-        + count_tokens("### User Question:\n")
-        + count_tokens(question)
-    )
+    # if body fits, great
+    if count_tokens(body) <= usable:
+        final_prompt = user_block
+    else:
+        # truncate to first N rows that fit
+        avg_per_row = max(1, count_tokens("\n".join(rows)) // len(rows))
+        max_rows    = max(1, usable // avg_per_row)
+        truncated   = "\n".join(rows[:max_rows])
+        final_prompt = f"{header}\n{truncated}\n\nUser asked: {question}\n"
 
-    async def send_chat(prompt: str) -> str:
+    async def send_openai(prompt: str) -> str:
         client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         resp = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
+                {"role": "system",  "content": system_prompt},
+                {"role": "user",    "content": prompt},
             ]
         )
         return resp.choices[0].message.content.strip()
 
     async def send_groq(prompt: str) -> str:
-        def run_sync():
+        def sync():
             client = Groq(api_key=os.getenv("GROQ_API_KEY"))
             resp = client.chat.completions.create(
-                model=groq_model,
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
+                    {"role": "user",   "content": prompt},
                 ]
             )
             return resp.choices[0].message.content.strip()
-        return await asyncio.to_thread(run_sync)
+        return await asyncio.to_thread(sync)
 
-    def make_prompt(csv_section: str) -> str:
-        return (
-            f"### Conversation History:\n{history_context}"
-            f"### CSV Data:\n{csv_section}\n\n"
-            f"### User Question:\n{question}"
-        )
+    # send it!
+    if use_groq:
+        return await send_groq(final_prompt)
+    else:
+        return await send_openai(final_prompt)
 
-    full_prompt = make_prompt(csv_text)
-    if static_tokens + count_tokens(full_prompt) <= usable_tokens:
-        return await (send_groq(full_prompt) if use_groq else send_chat(full_prompt))
-
-    lines = csv_text.split("\n")
-    header, rows = lines[0], lines[1:]
-    avg_tokens_per_row = max(1, count_tokens("\n".join(rows)) // len(rows))
-    rows_per_chunk = max(1, (usable_tokens - static_tokens) // avg_tokens_per_row)
-
-    while True:
-        chunks = [rows[i:i+rows_per_chunk] for i in range(0, len(rows), rows_per_chunk)]
-        if all(
-            static_tokens + count_tokens(make_prompt(header + "\n" + "\n".join(chunk))) <= usable_tokens
-            for chunk in chunks
-        ):
-            break
-        rows_per_chunk = max(1, rows_per_chunk // 2)
-
-    partials = []
-    for chunk in chunks:
-        prompt = make_prompt(header + "\n" + "\n".join(chunk))
-        part = await (send_groq(prompt) if use_groq else send_chat(prompt))
-        partials.append(part)
-
-    # synthesis = (
-    #     "Please combine the following partial responses into a single, well-structured answer to the user's question. "
-    #     "Ensure the response is formatted with bullet points for key insights or details, following this structure: "
-    #     "- **Introduction**: Brief context or overview. "
-    #     "- **Main Points**: Use bullet points for key information. "
-    #     "- **Conclusion**: Summarize or provide a closing statement, if relevant.\n\n"
-    #     + "\n---\n".join(partials)
-    # )
-    synthesis = (
-    "You are an AI assistant combining multiple responses into a **single well-formatted final answer**. "
-    "Follow this format strictly:\n\n"
-    "###**Introduction**\n"
-    "- Brief overview of the topic or question.\n\n"
-    "### **Main Points**\n"
-    "- Use bullet points.\n"
-    "- Each bullet should cover one clear insight.\n\n"
-    "### **Conclusion**\n"
-    "- A final summary or recommendation, if applicable.\n\n"
-    "Combine these partial responses:\n\n"
-    + "\n---\n".join(partials)
-)
-
-    return await (send_groq(synthesis) if use_groq else send_chat(synthesis))
 
 
 
@@ -432,23 +390,35 @@ def main():
     <style>
       .user-message {
         border: 1px solid #6B7280;
-        color: #F9FAFB;
+        color: #4B5563;
         padding: 0.75rem 1rem;
         border-radius: 0.375rem;
         margin: 0.5rem 0;
         max-width: 80%;
       }
       .assistant-message {
-        border: 1px solid #4B5563;
         color: #F9FAFB;
         padding: 0.75rem 1rem;
         border-radius: 0.375rem;
         margin: 0.5rem 0;
         max-width: 80%;
-        background-color: #1F2937;
+      }
+      .assistant-message h1,
+      .assistant-message h2,
+      .assistant-message h3,
+      .assistant-message h4,
+      .assistant-message h5,
+      .assistant-message h6 {
+        color: #FFFFFF !important;
+        margin-top: 0.8rem;
+        margin-bottom: 0.4rem;
+      }
+      .assistant-message ul {
+        margin-left: 1.5rem;
       }
     </style>
     """, unsafe_allow_html=True)
+
 
     st.title("🕸️ TPI Overwatch AI")
 
@@ -465,9 +435,12 @@ def main():
             "DVA Website About",
             "DVA Website Home",
             "DVA Website Latest News",
+            "X DVA"
         ],
         "AWM": [
             "articles",
+            "X AWM",
+            "Instagram AWM"
         ],
         "RMA": [
             "RMA",
@@ -601,19 +574,23 @@ def main():
         else: 
             pairs.append((chat_history[i], None))
     for pair_idx, (user_msg, assistant_msg) in enumerate(reversed(pairs)):
-      
+
         st.markdown(f'<div class="user-message">👤 {user_msg["content"]}</div>', unsafe_allow_html=True)
+    
+        if assistant_msg and assistant_msg["content"].strip():
+            with st.container():
+                st.markdown('<div class="assistant-message">', unsafe_allow_html=True)
+                st.markdown(assistant_msg["content"], unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
         
-        if assistant_msg:
-            st.markdown(f'<div class="assistant-message"> {assistant_msg["content"]}</div>', unsafe_allow_html=True)
-            docx_buffer = create_docx(assistant_msg["content"])
-            st.download_button(
-                label="Save Article Draft",
-                data=docx_buffer,
-                file_name=f"Article_{pair_idx}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key=f"download_{pair_idx}"
-            )
+                docx_buffer = create_docx(assistant_msg["content"])
+                st.download_button(
+                    label="Save Article Draft",
+                    data=docx_buffer,
+                    file_name=f"Article_{pair_idx}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key=f"download_{pair_idx}"
+                )
 
     st.markdown("---")
 

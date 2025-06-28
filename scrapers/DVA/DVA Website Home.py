@@ -9,13 +9,23 @@ import pandas as pd
 from urllib.parse import urljoin  
 from webdriver_manager.chrome import ChromeDriverManager 
 
-BASE_URL = "https://clik.dva.gov.au/"
-options = webdriver.ChromeOptions()
-options = webdriver.ChromeOptions()
-options.add_argument("--headless=new")  # Headless mode (for latest Chrome)
-options.add_argument("--window-size=1920,1080")  # Optional, ensures layout is proper
-service = Service(ChromeDriverManager().install())
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+
+options = Options()
+options.binary_location = "/usr/bin/chromium"
+options.add_argument("--headless")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
+options.add_argument("--window-size=1920,1080")
+
+# ✅ Use the ChromeDriver path that works inside Docker
+service = Service("/usr/lib/chromium/chromedriver")
 driver = webdriver.Chrome(service=service, options=options)
+
+BASE_URL = "https://clik.dva.gov.au/"
 
 try:
     driver.get("https://clik.dva.gov.au/")
