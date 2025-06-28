@@ -97,7 +97,7 @@ for link in list(post_links)[:10]:
     
 
 df = pd.DataFrame(posts_data)
-df.to_csv(f"{USERNAME}_posts.csv", index=False)
+df.to_csv(f"Instagram AWM.csv", index=False)
 print(f"Saved {len(posts_data)} posts to {USERNAME}_posts.csv")
 
 driver.quit()
